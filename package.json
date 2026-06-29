@@ -1,0 +1,11 @@
+{
+  "name": "family-tree",
+  "version": "1.0.0",
+  "description": "A simple, shareable family tree website backed by a JSON file (optionally Supabase).",
+  "type": "module",
+  "scripts": {
+    "start": "node serve.js",
+    "serve": "node serve.js"
+  },
+  "license": "MIT"
+}

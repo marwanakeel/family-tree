@@ -1,0 +1,20 @@
+# dependencies / OS
+node_modules/
+*.log
+.DS_Store
+
+# tooling / local scratch / env
+.claude/
+.env
+.env.*
+
+# ── Real family data & source material — NEVER commit (contains living people's info) ──
+# The app ships js/seed.js + family.sample.json as the demo; your real tree stays local.
+family.json
+family.before-*.json
+family.real.json
+import/
+*.ps
+Untitled-1.*
+# one-shot deploy script embeds the real family.json (gzip+base64)
+deploy/k3s/truenas-oneshot.sh

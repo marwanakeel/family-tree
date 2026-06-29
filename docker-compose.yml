@@ -1,0 +1,25 @@
+# Family Tree — Docker Compose for TrueNAS SCALE (Apps → Custom App) or any
+# machine with Docker. Two ways to use it:
+#
+#  A) Bind-mount (recommended on TrueNAS — no image build needed):
+#     Put this project's files in a dataset, set the path below, and deploy.
+#     To update the site, just edit the files in that dataset.
+#
+#  B) Build the included Dockerfile instead: comment out the `image:` +
+#     `volumes:` lines and uncomment the `build:` line.
+#
+# Then open  http://<truenas-ip>:8088
+
+services:
+  familytree:
+    image: nginx:1.27-alpine
+    # build: .            # <- use this instead of image+volumes to build the Dockerfile
+    container_name: familytree
+    restart: unless-stopped
+    ports:
+      - "8088:80"
+    volumes:
+      # CHANGE this left-hand path to wherever you copied the project on TrueNAS,
+      # e.g. /mnt/tank/apps/familytree
+      - /mnt/tank/apps/familytree:/usr/share/nginx/html:ro
+      - /mnt/tank/apps/familytree/nginx.conf:/etc/nginx/conf.d/default.conf:ro

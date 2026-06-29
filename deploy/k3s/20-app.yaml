@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: familytree
+  namespace: familytree
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: familytree
+  template:
+    metadata:
+      labels:
+        app: familytree
+    spec:
+      containers:
+        - name: web
+          # Static nginx image (app + family.json baked in). Built for linux/amd64
+          # and pushed to Docker Hub; k3s pulls it on first run, then caches.
+          # Bump the tag every deploy (mutable tags don't re-pull with IfNotPresent).
+          image: docker.io/marwanhefny/familytree:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "10m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          volumeMounts:
+            - name: data
+              mountPath: /data        # nginx serves /family.json from here
+              readOnly: true
+      volumes:
+        - name: data
+          # family.json lives on the node (NOT in the image). Place it at
+          # /mnt/Big Tank/containers/familytree/family.json. Replace that file
+          # to update the tree — nginx serves it live (no rebuild/redeploy).
+          hostPath:
+            path: "/mnt/Big Tank/containers/familytree"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: familytree
+  namespace: familytree
+spec:
+  type: NodePort                 # host cloudflared reaches it at <nodeIP>:30086
+  selector:
+    app: familytree
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30086            # dfsa uses 30085 — keep these distinct
