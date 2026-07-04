@@ -29,16 +29,20 @@
       </div>
 
       <div class="toolbar">
-        <button id="btnAdd" class="primary">＋ <span class="lbl" data-i18n="add">فرد</span></button>
         <button id="btnHome" data-i18n-title="home" title="الرئيسية">🏠 <span class="lbl" data-i18n="home">الرئيسية</span></button>
         <button id="btnMode" data-i18n-title="toggleView" title="تبديل العرض">🎯 <span class="lbl" data-i18n="fullTree">كل الشجرة</span></button>
-        <button id="btnFit" title="ملاءمة العرض">⤢ <span class="lbl" data-i18n="all">ملاءمة</span></button>
-        <button id="btnReload" data-i18n-title="reloadFile" title="تحديث من الملف">↻ <span class="lbl" data-i18n="reloadFile">تحديث</span></button>
-        <button id="btnExport" title="تنزيل ملف العائلة">⬇︎ <span class="lbl" data-i18n="export">تصدير</span></button>
-        <button id="btnImport" title="فتح ملف عائلة">⬆︎ <span class="lbl" data-i18n="import">استيراد</span></button>
+        <button id="btnBrowse" data-i18n-title="browse" title="تصفّح">📖 <span class="lbl" data-i18n="browse">تصفّح</span></button>
+        <button id="btnMore" class="more-btn" data-i18n-title="more" title="المزيد">⋯</button>
+        <div id="moreGroup" class="more-group">
+          <button id="btnAdd" class="primary">＋ <span class="lbl" data-i18n="add">فرد</span></button>
+          <button id="btnFit" title="ملاءمة العرض">⤢ <span class="lbl" data-i18n="all">ملاءمة</span></button>
+          <button id="btnReload" data-i18n-title="reloadFile" title="تحديث من الملف">↻ <span class="lbl" data-i18n="reloadFile">تحديث</span></button>
+          <button id="btnExport" title="تنزيل ملف العائلة">⬇︎ <span class="lbl" data-i18n="export">تصدير</span></button>
+          <button id="btnImport" title="فتح ملف عائلة">⬆︎ <span class="lbl" data-i18n="import">استيراد</span></button>
+          <button id="btnLang" class="lang" title="العربية / English">EN</button>
+          <button id="btnHelp" class="icon" data-i18n-title="help" title="مساعدة">؟</button>
+        </div>
         <input id="fileInput" type="file" accept="application/json,.json" hidden />
-        <button id="btnLang" class="lang" title="العربية / English">EN</button>
-        <button id="btnHelp" class="icon" data-i18n-title="help" title="مساعدة">؟</button>
       </div>
     </header>
 
@@ -50,6 +54,15 @@
       <div id="minimap" class="minimap" hidden>
         <canvas id="minimapCanvas" width="220" height="150"></canvas>
         <div id="minimapView" class="minimap-view"></div>
+      </div>
+
+      <div id="browse" class="browse" hidden>
+        <nav class="browse-tabs" aria-label="عرض">
+          <button data-tab="list" class="active" data-i18n="tabList">القائمة</button>
+          <button data-tab="fam" data-i18n="tabFam">العائلات</button>
+          <button data-tab="dir" data-i18n="tabDir">الدليل</button>
+        </nav>
+        <div id="browseBody" class="browse-body"></div>
       </div>
 
       <div id="emptyState" hidden>

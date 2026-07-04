@@ -7,7 +7,7 @@ const VER_KEY = 'familyTree.data.ver';
 // Bump this whenever the shipped family.json changes materially. A cached copy
 // from an older version is treated as stale and the file is reloaded instead,
 // so structural corrections aren't hidden behind a browser's saved snapshot.
-const DATA_VERSION = '2026-06-29-3wives';
+const DATA_VERSION = '2026-07-04-fixes2';
 
 let _client = null;
 async function client() {

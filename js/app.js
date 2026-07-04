@@ -27,6 +27,7 @@ function applyLang() {
   applyTitle();
   if (layout.nodes.length) render(); // re-draw cards in the new language
   updateModeButton();
+  updateBrowseButton();
   updateBreadcrumbs();
   if (selectedId && byId(selectedId) && panel.classList.contains('open') && !panel.querySelector('#personForm')) openPerson(selectedId);
 }
@@ -48,6 +49,13 @@ const collapsed = new Set(); // ids whose descendants are folded away
 let downSet = new Set();     // focus + its descendants currently shown (where folding makes sense)
 let recents = (() => { try { return JSON.parse(localStorage.getItem('familyTree.recents')) || []; } catch { return []; } })();
 
+// ---------- Browse surface (the calm complement to the canvas) ----------
+let surface = 'tree';        // 'tree' = SVG canvas · 'browse' = list/families/directory
+let browseTab = (() => { try { return localStorage.getItem('familyTree.browseTab'); } catch { return null; } })() || 'list';
+if (!['list', 'fam', 'dir'].includes(browseTab)) browseTab = 'list';
+const expandedRows = new Set(); // outline rows whose children are shown
+let famId = null;               // household anchor in the families tab
+
 // ---------- DOM ----------
 const svg = $('#tree');
 const stage = $('#stage');
@@ -67,7 +75,18 @@ async function init() {
   wireSearch();
   wireKeyboard();
   wireMinimap();
+  wireBrowse();
   refreshStageRect();
+
+  // Deployment-local overrides (edit password, title) served next to the data —
+  // kept OUT of the public image/repo. Missing file = defaults, silently.
+  try {
+    const r = await fetch('config.local.json', { cache: 'no-store' });
+    if (r.ok) {
+      Object.assign(CONFIG, await r.json());
+      unlocked = !CONFIG.editPassword;
+    }
+  } catch {}
 
   $('#modeBadge').classList.toggle('shared', getMode() === 'shared');
 
@@ -78,9 +97,22 @@ async function init() {
   }
   applyTitle();
   focusId = pickInitialFocus();
+  famId = focusId;
+  const root0 = rootPersonId();
+  if (root0) expandedRows.add(root0);
+  const h0 = readHash();
+  if (h0.v) { surface = 'browse'; browseTab = h0.v; }
   render();
   applyLang();
   startView();
+
+  // One-time welcome hint for first-time family visitors.
+  try {
+    if (!localStorage.getItem('familyTree.hinted') && data.people.length > 1) {
+      localStorage.setItem('familyTree.hinted', '1');
+      setTimeout(() => toast(t('firstVisitHint')), 900);
+    }
+  } catch {}
 
   // Live updates from other family members (shared mode only).
   subscribe((incoming) => {
@@ -168,6 +200,19 @@ function cardName(p) {
   }
   return out.length < full.length ? out + '…' : out;
 }
+// Card name over up to TWO lines — compound Arabic names are the norm here and
+// a single 18-char line chopped most of them.
+function nameLines(p) {
+  const full = fullName(p);
+  const LIM = 16;
+  if (full.length <= LIM) return [full];
+  const toks = full.split(/\s+/);
+  let l1 = toks[0] || '', i = 1;
+  while (i < toks.length && (l1 + ' ' + toks[i]).length <= LIM) { l1 += ' ' + toks[i]; i++; }
+  let l2 = toks.slice(i).join(' ');
+  if (l2.length > LIM) l2 = l2.slice(0, LIM - 1) + '…';
+  return l2 ? [l1, l2] : [l1];
+}
 
 // =====================================================================
 // Focus / pedigree navigation
@@ -201,9 +246,17 @@ const rootPersonId = () => (byId('n1') ? 'n1' : (data.people[0] ? data.people[0]
 // Navigate to a person: in focus mode this re-roots the view on them.
 function goTo(id) {
   if (!byId(id)) return;
+  if (surface === 'browse') {
+    pushRecent(id);
+    if (browseTab === 'fam') { famId = id; renderBrowse(); scrollBrowseTop(); }
+    else revealInBrowse(id);
+    openPerson(id);
+    updateHash(id);
+    return;
+  }
   if (mode === 'focus' && id !== focusId) { focusId = id; pushRecent(id); render(); }
   openPerson(id);
-  focusOn(id);
+  if (mode === 'focus') frameFocus(id); else focusOn(id);
   updateHash(id);
 }
 function pushRecent(id) {
@@ -215,7 +268,7 @@ function setMode(m) {
   mode = m;
   render();
   if (mode === 'all') fit();
-  else if (focusId && byId(focusId)) focusOn(focusId);
+  else if (focusId && byId(focusId)) frameFocus(focusId);
   updateModeButton();
   updateBreadcrumbs();
 }
@@ -223,38 +276,64 @@ function toggleMode() { setMode(mode === 'focus' ? 'all' : 'focus'); }
 function goHome() {
   const root = rootPersonId();
   if (!root) return;
+  if (surface === 'browse') setSurface('tree');
   mode = 'focus'; focusId = root; collapsed.clear();
-  pushRecent(root); render(); focusOn(root); openPerson(root);
-  updateModeButton();
+  pushRecent(root); render(); frameFocus(root);
+  updateModeButton(); updateBreadcrumbs(); updateHash(root);
 }
 function updateModeButton() {
   const b = $('#btnMode'); if (!b) return;
   const lbl = b.querySelector('.lbl');
   if (lbl) lbl.textContent = mode === 'focus' ? t('fullTree') : t('focusView');
 }
-function readHashId() {
-  const m = /[#&]p=([^&]+)/.exec(location.hash || '');
-  return m ? decodeURIComponent(m[1]) : null;
+// Hash schema: #p=<id> (tree) or #v=list|fam|dir&p=<id> (browse views).
+function readHash() {
+  const h = location.hash || '';
+  const p = /[#&]p=([^&]+)/.exec(h);
+  const v = /[#&]v=(list|fam|dir)/.exec(h);
+  return { id: p ? decodeURIComponent(p[1]) : null, v: v ? v[1] : null };
 }
-function updateHash(id) { try { history.replaceState(null, '', '#p=' + encodeURIComponent(id)); } catch {} }
+function readHashId() { return readHash().id; }
+function updateHash(id) {
+  const anchor = id || (surface === 'browse' && browseTab === 'fam' ? famId : focusId);
+  const v = surface === 'browse' ? 'v=' + browseTab + '&' : '';
+  try { history.replaceState(null, '', '#' + v + (anchor ? 'p=' + encodeURIComponent(anchor) : '')); } catch {}
+}
 function pickInitialFocus() {
   const h = readHashId();
   return (h && byId(h)) ? h : rootPersonId();
 }
 function startView() {
   if (mode === 'focus' && focusId && byId(focusId)) {
-    focusOn(focusId);
+    // A deep link opens that person's card; the plain landing stays uncluttered.
     const h = readHashId();
     if (h && byId(h)) openPerson(h);
+    frameFocus(focusId);
   } else initialView();
+  if (surface === 'browse') {
+    setSurface('browse');
+    const h = readHashId();
+    if (h && byId(h) && browseTab !== 'fam') revealInBrowse(h);
+  }
 }
 
 // =====================================================================
 // Rendering
 // =====================================================================
+// Pick the deepest focus view (up to 3 generations down) that still lays out
+// at a browsable width. Huge branches (the root!) land at 1 generation — the
+// whole family row visible side by side — and the "+N" badges open the rest.
+function focusLayout() {
+  refreshStageRect();
+  const maxW = Math.max(2400, (stageRect && stageRect.width ? stageRect.width : 1200) * 3.2);
+  for (let depth = 3; depth >= 1; depth--) {
+    const ly = computeLayout(egoData(focusId, depth));
+    if (depth === 1 || ly.bbox.maxX - ly.bbox.minX <= maxW) return ly;
+  }
+}
+
 function render() {
-  const src = (mode === 'focus' && focusId && byId(focusId)) ? egoData(focusId) : data;
-  layout = computeLayout(src);
+  layout = (mode === 'focus' && focusId && byId(focusId)) ? focusLayout() : computeLayout(data);
   posById.clear();
   for (const n of layout.nodes) posById.set(n.id, { x: n.x, y: n.y });
 
@@ -318,6 +397,7 @@ function render() {
   drawMinimap();
   updateBreadcrumbs();
   applyTransform();
+  if (surface === 'browse') renderBrowse(); // keep the list in sync with edits/language
 }
 
 function toAr(n) {
@@ -328,12 +408,22 @@ function yearNum(s) {
   const m = /\d{3,4}/.exec(a);
   return m ? +m[0] : null;
 }
+// Generations of the WHOLE family (not the current focus slice) — memoized per
+// data object so the header stat doesn't change as you navigate.
+let _gensFor = null, _gens = 0;
+function familyGens() {
+  if (_gensFor === data.people) return _gens;
+  _gensFor = data.people;
+  const full = computeLayout(data);
+  _gens = full.nodes.length ? Math.max(...full.nodes.map((n) => n.depth)) + 1 : 0;
+  return _gens;
+}
 function updateStats() {
   const node = $('#appStats');
   if (!node) return;
   const ppl = data.people.length;
   if (!ppl) { node.textContent = ''; return; }
-  const gens = layout.nodes.length ? Math.max(...layout.nodes.map((n) => n.depth)) + 1 : 0;
+  const gens = familyGens();
   let minY = Infinity;
   for (const p of data.people) { const y = yearNum(p.birth); if (y) minY = Math.min(minY, y); }
   const fmt = lang === 'ar' ? toAr : (x) => String(x);
@@ -381,23 +471,42 @@ function renderCard(p, node) {
     t.setAttribute('clip-path', `url(#${tclipId})`);
     g.append(t);
   };
-  clipped('name', 36, cardName(p));
+  const lines = nameLines(p);
+  const two = lines.length > 1;
+  clipped('name', two ? 28 : 36, lines[0]);
+  if (two) clipped('name', 46, lines[1]);
   const span = lifespan(p);
-  if (span) clipped('dates', 55, truncate(span, 18));
-  if (p.birthPlace) clipped('place', 72, truncate(p.birthPlace, 20));
+  if (span) clipped('dates', two ? 64 : 55, truncate(span, 18));
+  if (p.birthPlace) clipped('place', two ? 80 : 72, truncate(p.birthPlace, 20));
 
-  // Collapse / expand toggle (focus mode): fold a branch with "−", reopen with "+".
+  // Branch toggle (focus mode). Three cases:
+  //   children rendered → "−" folds the branch
+  //   collapsed         → "+N" reopens it
+  //   cut by the depth limit → "+N" re-roots on this person to reveal them.
+  // Without the third case, 3rd-generation cards with children looked childless.
   if (mode === 'focus' && downSet.has(p.id)) {
+    const kidCount = childrenOf(p.id).length;
     const isCollapsed = collapsed.has(p.id);
-    const hasRenderedKids = childrenOf(p.id).some((c) => posById.has(c));
-    if (isCollapsed || hasRenderedKids) {
+    const hasRenderedKids = !isCollapsed && childrenOf(p.id).some((c) => posById.has(c));
+    if (kidCount) {
       const tg = el('g', { class: 'toggle', transform: `translate(${NODE_W / 2}, ${NODE_H})` });
-      tg.append(el('circle', { class: 'toggle-bg', cx: 0, cy: 0, r: 9 }));
-      tg.append(text('toggle-sign', 0, 4.5, isCollapsed ? '+' : '−'));
+      if (hasRenderedKids) {
+        tg.append(el('circle', { class: 'toggle-bg', cx: 0, cy: 0, r: 9 }));
+        tg.append(text('toggle-sign', 0, 4.5, '−'));
+      } else {
+        const label = '+' + (lang === 'ar' ? toAr(kidCount) : kidCount);
+        const w = Math.max(24, 12 + label.length * 8);
+        tg.append(el('rect', { class: 'toggle-bg', x: -w / 2, y: -10, width: w, height: 20, rx: 10 }));
+        tg.append(text('toggle-sign', 0, 4.5, label));
+      }
+      const tip = el('title', {});
+      tip.textContent = hasRenderedKids ? t('collapse') : t('expand');
+      tg.append(tip);
       tg.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (isCollapsed) collapsed.delete(p.id); else collapsed.add(p.id);
-        render();
+        if (hasRenderedKids) { collapsed.add(p.id); render(); }
+        else if (isCollapsed) { collapsed.delete(p.id); render(); }
+        else goTo(p.id); // depth-cut: re-root here so the hidden generations open up
       });
       g.append(tg);
     }
@@ -434,7 +543,9 @@ function applyTransform() {
   updateMinimapView();
 }
 function clampK(k) {
-  return Math.max(0.12, Math.min(2.6, k));
+  // Floor low enough that fit() can truly frame the ~16k-px-wide full tree even
+  // on a phone (LOD + the minimap keep the far-out view navigable).
+  return Math.max(0.03, Math.min(2.6, k));
 }
 function zoomAt(px, py, factor) {
   const k2 = clampK(view.k * factor);
@@ -520,19 +631,247 @@ function wireMinimap() {
   cv.addEventListener('pointercancel', end);
 }
 
-// ---- Breadcrumbs (ancestor spine root → focus) ----
+// ---- Breadcrumbs (ancestor spine root → the current anchor) ----
+// Anchor = the focused person on the canvas, or the current household in the
+// families tab. The outline/directory tabs don't need a trail.
 function updateBreadcrumbs() {
   const bar = $('#breadcrumbs'); if (!bar) return;
-  if (mode !== 'focus' || !focusId || !byId(focusId)) { bar.hidden = true; bar.innerHTML = ''; return; }
-  const chain = []; let cur = focusId; const seen = new Set();
+  const anchor = surface === 'browse'
+    ? (browseTab === 'fam' ? famId : null)
+    : (mode === 'focus' ? focusId : null);
+  if (!anchor || !byId(anchor)) { bar.hidden = true; bar.innerHTML = ''; return; }
+  const chain = []; let cur = anchor; const seen = new Set();
   while (cur && !seen.has(cur)) { seen.add(cur); chain.push(cur); cur = parentsOf(cur)[0]; }
   chain.reverse();
   bar.hidden = false;
   bar.innerHTML = chain
-    .map((id) => `<button class="crumb${id === focusId ? ' current' : ''}" data-goto="${id}">${escapeHtml(cardName(byId(id)))}</button>`)
+    .map((id) => `<button class="crumb${id === anchor ? ' current' : ''}" data-goto="${escapeAttr(id)}">${escapeHtml(cardName(byId(id)))}</button>`)
     .join('<span class="crumb-sep">›</span>');
   bar.querySelectorAll('[data-goto]').forEach((c) => (c.onclick = () => goTo(c.getAttribute('data-goto'))));
 }
+// =====================================================================
+// Browse surface — outline / families / directory
+// =====================================================================
+function setSurface(s, tab) {
+  surface = s;
+  if (tab) browseTab = tab;
+  document.body.classList.toggle('browsing', s === 'browse');
+  $('#browse').hidden = s !== 'browse';
+  if (s === 'browse') {
+    try { localStorage.setItem('familyTree.browseTab', browseTab); } catch {}
+    renderBrowse();
+  }
+  updateBrowseButton();
+  updateBreadcrumbs();
+  updateHash();
+}
+function updateBrowseButton() {
+  const b = $('#btnBrowse'); if (!b) return;
+  const key = surface === 'browse' ? 'backToTree' : 'browse';
+  b.innerHTML = (surface === 'browse' ? '🌳 ' : '📖 ') + `<span class="lbl">${t(key)}</span>`;
+  b.title = t(key);
+}
+const scrollBrowseTop = () => { const bb = $('#browseBody'); if (bb) bb.scrollTop = 0; };
+
+function renderBrowse() {
+  const body = $('#browseBody'); if (!body || surface !== 'browse') return;
+  $('#browse').querySelectorAll('.browse-tabs button').forEach((b) =>
+    b.classList.toggle('active', b.getAttribute('data-tab') === browseTab)
+  );
+  if (browseTab === 'list') renderOutline(body);
+  else if (browseTab === 'fam') renderFam(body);
+  else renderDir(body);
+}
+
+// --- outline (قائمة): the family as a collapsible table of contents ---
+function renderOutline(body) {
+  const root = rootPersonId();
+  if (!root) { body.innerHTML = ''; return; }
+  const cnt = (n) => (lang === 'ar' ? toAr(n) : String(n));
+  let html = `<div class="browse-actions">
+      <button data-act="expandAll">${t('expandAll')}</button>
+      <button data-act="collapseAll">${t('collapseAll')}</button>
+    </div>`;
+  const seen = new Set(); // guard against cycles in imported data
+  const addRow = (id, depth) => {
+    const p = byId(id); if (!p || seen.has(id)) return;
+    seen.add(id);
+    const kids = childrenOf(id);
+    const open = expandedRows.has(id);
+    html += `<div class="brow${id === selectedId ? ' sel' : ''}" data-id="${escapeAttr(id)}" style="--d:${depth}">
+      ${kids.length ? `<button class="btwist" title="${t(open ? 'collapse' : 'expand')}">${open ? '▾' : '▸'}</button>` : '<span class="btwist none">·</span>'}
+      <span class="bdot ${genderClass(p)}"></span>
+      <span class="bname">${escapeHtml(fullName(p))}</span>
+      ${kids.length ? `<span class="bcount" title="${t('children')}">${cnt(kids.length)}</span>` : ''}
+      <span class="bmeta">${escapeHtml(lifespan(p))}</span>
+      <button class="btree" title="${t('showInTree')}">🌳</button>
+    </div>`;
+    if (open) for (const c of kids) addRow(c, depth + 1);
+  };
+  addRow(root, 0);
+  body.innerHTML = html;
+}
+// Expand every ancestor of `id`, re-render, then scroll its row into view.
+// Married-in spouses have no outline row of their own — their place in the
+// family IS their spouse's row, so fall back to it.
+function revealInBrowse(id) {
+  const rowTarget = () => $('#browseBody').querySelector(`[data-id="${CSS.escape(id)}"]`)
+    || spousesOf(id).map((s) => $('#browseBody').querySelector(`[data-id="${CSS.escape(s)}"]`)).find(Boolean);
+  if (browseTab === 'list') {
+    const expandUp = (from) => {
+      let cur = from;
+      const seen = new Set();
+      while (cur && !seen.has(cur)) { seen.add(cur); const par = parentsOf(cur)[0]; if (par) expandedRows.add(par); cur = par; }
+    };
+    expandUp(id);
+    if (!parentsOf(id).length) for (const s of spousesOf(id)) { expandUp(s); const par = parentsOf(s)[0]; if (par) expandedRows.add(par); }
+  }
+  renderBrowse();
+  const row = rowTarget();
+  if (row) {
+    row.scrollIntoView({ block: 'center' });
+    row.classList.add('flash');
+    setTimeout(() => row.classList.remove('flash'), 1600);
+  }
+}
+
+// --- families (عائلات): one household per screen, tap a child to drill in ---
+function renderFam(body) {
+  if (!famId || !byId(famId)) famId = rootPersonId();
+  const p = byId(famId);
+  if (!p) { body.innerHTML = ''; return; }
+  const pars = parentsOf(famId), spouses = spousesOf(famId);
+  // The household's children are the couple's: this data links children to one
+  // parent (the father), so a wife's screen pulls them in via her spouse.
+  let kids = childrenOf(famId);
+  if (!kids.length && spouses.length) {
+    const set = new Set();
+    for (const s of spouses) for (const c of childrenOf(s)) set.add(c);
+    kids = [...set];
+  }
+  const cnt = (n) => (lang === 'ar' ? toAr(n) : String(n));
+  const kidCard = (cid) => {
+    const c = byId(cid);
+    const n = childrenOf(cid).length;
+    return `<div class="fam-kid ${genderClass(c)}" data-id="${escapeAttr(cid)}" data-drill="${escapeAttr(cid)}">
+      <button class="binfo" title="${t('personCard')}">ⓘ</button>
+      <div class="fk-name">${escapeHtml(fullName(c))}</div>
+      <div class="fk-meta">${escapeHtml(lifespan(c))}</div>
+      ${n ? `<span class="bcount" title="${t('children')}">${cnt(n)}</span>` : ''}
+    </div>`;
+  };
+  body.innerHTML = `
+    ${pars.length ? `<button class="fam-up" data-drill="${escapeAttr(pars[0])}">↑ ${t('upToParent')}: ${escapeHtml(cardName(byId(pars[0])))}</button>` : ''}
+    <div class="fam-head" data-id="${escapeAttr(famId)}">
+      <div class="avatar ${genderClass(p)}">${initials(p)}</div>
+      <div style="min-width:0">
+        <h3>${escapeHtml(fullName(p))}</h3>
+        <div class="sub">${escapeHtml(lifespan(p) || field(p, 'occupation') || '')}</div>
+      </div>
+      <button class="btree" title="${t('showInTree')}">🌳</button>
+    </div>
+    ${spouses.length ? `<div class="fam-sp"><span class="bmeta">${t('spouse')}: </span>${spouses.map((s) => `<span class="chip" data-id="${escapeAttr(s)}">${escapeHtml(fullName(byId(s)))}</span>`).join('')}</div>` : ''}
+    <h4 class="section-h">${t('children')}${kids.length ? ` (${cnt(kids.length)})` : ''}</h4>
+    ${kids.length ? `<div class="fam-kids">${kids.map(kidCard).join('')}</div>` : `<p class="hint">${t('noChildren')}</p>`}`;
+}
+function famGo(id) {
+  if (!byId(id)) return;
+  famId = id;
+  pushRecent(id);
+  renderBrowse();
+  scrollBrowseTop();
+  updateBreadcrumbs();
+  updateHash(id);
+}
+
+// --- directory (دليل): everyone, A–Z, with the father shown to tell the
+// --- sixty-one أحمدs apart ---
+function renderDir(body) {
+  const coll = new Intl.Collator(lang === 'ar' ? 'ar' : 'en');
+  const rows = data.people.map((p) => ({ p, name: fullName(p) })).sort((a, b) => coll.compare(a.name, b.name));
+  const groups = new Map();
+  for (const r of rows) {
+    const L = norm(r.name).charAt(0) || '؟';
+    if (!groups.has(L)) groups.set(L, []);
+    groups.get(L).push(r);
+  }
+  const letters = [...groups.keys()];
+  const fatherOf = (p) => {
+    const f = parentsOf(p.id)[0];
+    if (!f) return '';
+    const rel = p.gender === 'female' ? t('daughterOf') : p.gender === 'male' ? t('sonOf') : t('childOf');
+    return `${rel} ${escapeHtml(cardName(byId(f)))}`;
+  };
+  body.innerHTML =
+    `<div class="dir-letters">${letters.map((l) => `<button data-letter="${escapeAttr(l)}">${escapeHtml(l)}</button>`).join('')}</div>` +
+    letters.map((l) =>
+      `<h4 class="dir-h" data-letter="${escapeAttr(l)}">${escapeHtml(l)}</h4>` +
+      groups.get(l).map(({ p }) => `<div class="brow dir-row" data-id="${escapeAttr(p.id)}">
+        <span class="bdot ${genderClass(p)}"></span>
+        <span class="bname">${escapeHtml(fullName(p))}</span>
+        <span class="bmeta">${fatherOf(p)}</span>
+        <span class="bmeta">${escapeHtml(lifespan(p))}</span>
+        <button class="btree" title="${t('showInTree')}">🌳</button>
+      </div>`).join('')
+    ).join('');
+}
+
+// Everything in the browse surface routes through one delegated handler.
+function wireBrowse() {
+  $('#browse').querySelectorAll('.browse-tabs button').forEach((b) =>
+    b.addEventListener('click', () => {
+      browseTab = b.getAttribute('data-tab');
+      try { localStorage.setItem('familyTree.browseTab', browseTab); } catch {}
+      renderBrowse();
+      scrollBrowseTop();
+      updateBreadcrumbs();
+      updateHash();
+    })
+  );
+  $('#browseBody').addEventListener('click', (e) => {
+    const act = e.target.closest('[data-act]');
+    if (act) {
+      if (act.getAttribute('data-act') === 'expandAll') {
+        const seen = new Set();
+        const walk = (id) => {
+          if (seen.has(id)) return;
+          seen.add(id);
+          const kids = childrenOf(id);
+          if (kids.length) expandedRows.add(id);
+          for (const c of kids) walk(c);
+        };
+        const root = rootPersonId(); if (root) walk(root);
+      } else { expandedRows.clear(); const root = rootPersonId(); if (root) expandedRows.add(root); }
+      renderBrowse();
+      return;
+    }
+    const letter = e.target.closest('button[data-letter]');
+    if (letter) {
+      const h = $('#browseBody').querySelector(`.dir-h[data-letter="${CSS.escape(letter.getAttribute('data-letter'))}"]`);
+      if (h) h.scrollIntoView({ block: 'start' });
+      return;
+    }
+    const row = e.target.closest('[data-id]');
+    const twist = e.target.closest('.btwist:not(.none)');
+    if (twist && row) {
+      const id = row.getAttribute('data-id');
+      if (expandedRows.has(id)) expandedRows.delete(id); else expandedRows.add(id);
+      renderBrowse();
+      return;
+    }
+    if (e.target.closest('.btree') && row) { jumpToTree(row.getAttribute('data-id')); return; }
+    if (e.target.closest('.binfo') && row) { openPerson(row.getAttribute('data-id')); return; }
+    const drill = e.target.closest('[data-drill]');
+    if (drill) { famGo(drill.getAttribute('data-drill')); return; }
+    if (row) openPerson(row.getAttribute('data-id'));
+  });
+}
+// Leave the browse surface and land on this person in the canvas.
+function jumpToTree(id) {
+  setSurface('tree');
+  goTo(id);
+}
+
 function fit() {
   const { minX, minY, maxX, maxY } = layout.bbox;
   const w = Math.max(1, maxX - minX);
@@ -653,15 +992,55 @@ function animateView(tx, ty, tk, ms = 480) {
   focusAnim = requestAnimationFrame(step);
 }
 
+// The part of the stage NOT covered by the open side panel (RTL: panel overlays
+// the inline-start = right edge; LTR: the left). Centering inside this rect
+// keeps the person visible instead of hidden behind their own card panel.
+function visibleRect() {
+  refreshStageRect();
+  const w = stageRect.width, h = stageRect.height;
+  const pw = panel.classList.contains('open') && w > 700 ? Math.min(380, w * 0.92) : 0;
+  const rtl = STRINGS[lang].dir === 'rtl';
+  return { x0: rtl ? 0 : pw, w: w - pw, h };
+}
+
 // "Center" on a person — pan to them AND zoom to a readable level so the name
 // is legible. Keeps the user's zoom if they're already closer in.
 function focusOn(id) {
   const pos = posById.get(id);
   if (!pos) return;
-  const rect = stage.getBoundingClientRect();
+  const vr = visibleRect();
   const k = clampK(Math.max(view.k, 1.15));
-  const tx = rect.width / 2 - (pos.x + NODE_W / 2) * k;
-  const ty = rect.height / 2 - (pos.y + NODE_H / 2) * k;
+  const tx = vr.x0 + vr.w / 2 - (pos.x + NODE_W / 2) * k;
+  const ty = vr.h / 2 - (pos.y + NODE_H / 2) * k;
+  animateView(tx, ty, k);
+}
+
+// Frame a person's IMMEDIATE family — them + spouses + children — instead of
+// centering one lonely card. This is the landing/navigation view in focus mode:
+// zoomed to keep names readable, the focus card in the upper third so the
+// children's generation shows below it.
+function frameFocus(id) {
+  const pos = posById.get(id);
+  if (!pos) return;
+  const group = [id, ...spousesOf(id), ...childrenOf(id)].filter((x) => posById.has(x));
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const gid of group) {
+    const gp = posById.get(gid);
+    minX = Math.min(minX, gp.x);
+    maxX = Math.max(maxX, gp.x + NODE_W);
+    minY = Math.min(minY, gp.y);
+    maxY = Math.max(maxY, gp.y + NODE_H);
+  }
+  const vr = visibleRect();
+  const pad = 36;
+  const fitK = (vr.w - pad * 2) / Math.max(1, maxX - minX);
+  const k = clampK(Math.min(1.15, Math.max(0.55, fitK)));
+  // If the family row fits, center the row; if it's wider than the screen,
+  // center on the focus card and let the row spill off both edges (the partial
+  // cards at the edges are the hint that there's more to pan to).
+  const cxWorld = fitK >= 0.55 ? (minX + maxX) / 2 : pos.x + NODE_W / 2;
+  const tx = vr.x0 + vr.w / 2 - cxWorld * k;
+  const ty = vr.h * 0.46 - ((minY + maxY) / 2) * k;
   animateView(tx, ty, k);
 }
 
@@ -700,7 +1079,7 @@ function openPerson(id) {
     `<ul class="facts">${arr.map(([k, v]) => `<li><span class="k">${k}</span><span class="v">${v}</span></li>`).join('')}</ul>`;
   const rel = (label, ids) =>
     ids.length
-      ? `<h4>${label}</h4>${ids.map((rid) => `<span class="chip" data-goto="${rid}">${escapeHtml(fullName(byId(rid)))}</span>`).join('')}`
+      ? `<h4>${label}</h4>${ids.map((rid) => `<span class="chip" data-goto="${escapeAttr(rid)}">${escapeHtml(fullName(byId(rid)))}</span>`).join('')}`
       : '';
 
   panel.innerHTML = `
@@ -727,6 +1106,7 @@ function openPerson(id) {
       </div>
       <div class="actions">
         <button data-action="focus">${t('center')}</button>
+        <button data-action="share">🔗 ${t('shareLink')}</button>
         <button data-action="edit" class="primary">${t('edit')}</button>
       </div>
       <div class="actions">
@@ -748,6 +1128,11 @@ function openPerson(id) {
   );
   panel.querySelector('[data-action="close"]').onclick = deselect;
   panel.querySelector('[data-action="focus"]').onclick = () => goTo(id);
+  panel.querySelector('[data-action="share"]').onclick = async () => {
+    const url = location.origin + location.pathname + '#p=' + encodeURIComponent(id);
+    try { await navigator.clipboard.writeText(url); toast(t('linkCopied')); }
+    catch { prompt(t('shareLink'), url); }
+  };
   panel.querySelector('[data-action="edit"]').onclick = () => requireUnlock(() => openForm('edit', p));
   panel.querySelector('[data-action="add-child"]').onclick = () => requireUnlock(() => openForm('child', null, id));
   panel.querySelector('[data-action="add-spouse"]').onclick = () => requireUnlock(() => openForm('spouse', null, id));
@@ -764,7 +1149,7 @@ function openRelations(id) {
 
   const sectionHtml = (label, kind, ids) => {
     const chips = ids
-      .map((rid) => `<span class="chip rel-chip" data-goto="${rid}">${escapeHtml(fullName(byId(rid)))}<button class="unlink" data-unlink="${kind}|${rid}" title="${t('unlink')}">×</button></span>`)
+      .map((rid) => `<span class="chip rel-chip" data-goto="${escapeAttr(rid)}">${escapeHtml(fullName(byId(rid)))}<button class="unlink" data-unlink="${escapeAttr(kind + '|' + rid)}" title="${t('unlink')}">×</button></span>`)
       .join('');
     const hint = { parent: t('linkParentHint'), spouse: t('linkSpouseHint'), child: t('linkChildHint') }[kind];
     return `<h4>${label}</h4>
@@ -817,7 +1202,7 @@ function openRelations(id) {
       const res = searchPeople(input.value, exclude());
       if (!res.length) return close();
       box.innerHTML = res
-        .map((r) => `<div class="item" data-pick="${r.id}"><span>${escapeHtml(fullName(r))}</span><small>${escapeHtml(lifespan(r))}</small></div>`)
+        .map((r) => `<div class="item" data-pick="${escapeAttr(r.id)}"><span>${escapeHtml(fullName(r))}</span><small>${escapeHtml(lifespan(r))}</small></div>`)
         .join('');
       box.hidden = false;
       box.querySelectorAll('[data-pick]').forEach((it) =>
@@ -965,14 +1350,26 @@ function isAncestorOf(aId, bId) {
   }
   return false;
 }
+// Normalize Arabic for matching so phone-typed queries find people:
+// unify hamza/alef forms (أإآٱ→ا), ى→ي, ة→ه, ؤ→و, ئ→ي, strip tashkeel/tatweel.
+function norm(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[ً-ْٰـ]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/ؤ/g, 'و')
+    .replace(/ئ/g, 'ي');
+}
 // people matching a query in either script, excluding given ids
 function searchPeople(q, exclude) {
-  q = q.trim().toLowerCase();
+  q = norm(q.trim());
   if (!q) return [];
   const ex = new Set(exclude || []);
   return data.people
     .filter((p) => !ex.has(p.id))
-    .filter((p) => `${p.firstName || ''} ${(p.en && p.en.firstName) || ''}`.toLowerCase().includes(q))
+    .filter((p) => norm(`${p.firstName || ''} ${p.lastName || ''} ${(p.en && p.en.firstName) || ''}`).includes(q))
     .slice(0, 8);
 }
 function removePerson(id) {
@@ -1009,6 +1406,7 @@ function wireToolbar() {
   $('#btnFit2').onclick = fit;
   const bm = $('#btnMode'); if (bm) bm.onclick = toggleMode;
   const bh = $('#btnHome'); if (bh) bh.onclick = goHome;
+  const bb = $('#btnBrowse'); if (bb) bb.onclick = () => setSurface(surface === 'tree' ? 'browse' : 'tree');
   $('#btnZoomIn').onclick = () => zoomAt(centerX(), centerY(), 1.2);
   $('#btnZoomOut').onclick = () => zoomAt(centerX(), centerY(), 1 / 1.2);
   const br = $('#btnReload');
@@ -1018,6 +1416,16 @@ function wireToolbar() {
   $('#fileInput').onchange = importJson;
   $('#btnHelp').onclick = () => $('#helpDialog').showModal();
   $('#btnHelpClose').onclick = () => $('#helpDialog').close();
+  // Mobile "⋯" — the secondary tools live in a dropdown there.
+  const more = $('#btnMore');
+  if (more) {
+    const tb = more.closest('.toolbar');
+    more.onclick = (e) => { e.stopPropagation(); tb.classList.toggle('more-open'); };
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.toolbar')) tb.classList.remove('more-open');
+    });
+    $('#moreGroup').addEventListener('click', () => tb.classList.remove('more-open'));
+  }
   $('#btnLang').onclick = () => {
     lang = lang === 'ar' ? 'en' : 'ar';
     try { localStorage.setItem('familyTree.lang', lang); } catch {}
@@ -1052,10 +1460,16 @@ function importJson(e) {
         people: incoming.people,
         relationships: Array.isArray(incoming.relationships) ? incoming.relationships : [],
       };
+      // Navigation state points at ids from the OLD tree — start fresh.
+      collapsed.clear();
+      expandedRows.clear();
+      focusId = famId = rootPersonId();
+      if (focusId) expandedRows.add(focusId);
       applyTitle();
       deselect();
       persist(t('imported')(data.people.length));
-      initialView();
+      if (surface === 'tree' && mode === 'focus' && focusId) frameFocus(focusId);
+      else if (surface === 'tree') initialView();
     } catch (err) {
       alert(t('importError') + err.message);
     }
@@ -1072,17 +1486,17 @@ function wireSearch() {
 
   const close = () => { results.hidden = true; active = -1; };
   const run = () => {
-    const q = input.value.trim().toLowerCase();
+    const q = norm(input.value.trim());
     if (!q) return close();
     matches = data.people
       .filter((p) => {
-        const hay = `${p.firstName || ''} ${p.lastName || ''} ${(p.en && p.en.firstName) || ''} ${p.birthPlace || ''}`.toLowerCase();
+        const hay = norm(`${p.firstName || ''} ${p.lastName || ''} ${(p.en && p.en.firstName) || ''} ${p.birthPlace || ''}`);
         return hay.includes(q);
       })
       .slice(0, 8);
     if (!matches.length) { results.innerHTML = `<div class="item"><span>${t('noMatches')}</span></div>`; results.hidden = false; return; }
     results.innerHTML = matches
-      .map((p, i) => `<div class="item${i === active ? ' active' : ''}" data-id="${p.id}"><span>${escapeHtml(fullName(p))}</span><small>${escapeHtml(lifespan(p))}</small></div>`)
+      .map((p, i) => `<div class="item${i === active ? ' active' : ''}" data-id="${escapeAttr(p.id)}"><span>${escapeHtml(fullName(p))}</span><small>${escapeHtml(lifespan(p))}</small></div>`)
       .join('');
     results.hidden = false;
     results.querySelectorAll('.item[data-id]').forEach((it) =>
@@ -1108,10 +1522,11 @@ function wireKeyboard() {
     if (e.target && e.target.matches && e.target.matches('input, textarea, select')) return;
     const k = e.key;
     if (k === 'Escape') { deselect(); $('#helpDialog').open && $('#helpDialog').close(); return; }
+    if (k === 'Home') { goHome(); e.preventDefault(); return; } // works everywhere (leaves browse)
+    if (surface !== 'tree') return; // zoom/fit/arrow shortcuts drive the canvas only
     if (k === '+' || k === '=') { zoomAt(centerX(), centerY(), 1.2); return; }
     if (k === '-' || k === '_') { zoomAt(centerX(), centerY(), 1 / 1.2); return; }
     if (k === 'f' || k === 'F') { fit(); return; }
-    if (k === 'Home') { goHome(); e.preventDefault(); return; }
     // Relative navigation with the arrow keys (needs a selected person).
     if (!selectedId || !byId(selectedId)) return;
     let target = null;

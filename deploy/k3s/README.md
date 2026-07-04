@@ -62,10 +62,12 @@ Cloudflare auto-creates the `family.l3tz.com` DNS record. Open **https://family.
 
 ## Access / editing
 - **Viewing is open** to anyone with the link.
-- **Editing is gated** by `editPassword` in `js/config.js` (currently
-  `laithi-admin-2026`) — add/edit/delete/relink prompt for it. It's a client-side
-  deterrent only; in this static deploy an edit affects just that viewer's own
-  browser. To change it: edit `js/config.js`, rebuild with a new tag, redeploy.
+- **Editing is gated** by an `editPassword` — set it in `${DATA_DIR}/config.local.json`
+  on the node (`{"editPassword": "…"}`), served at runtime next to the data.
+  **Never commit or bake a password** — the repo and the Docker image are public,
+  so anything inside them is public too. It's a client-side deterrent only; in
+  this static deploy an edit affects just that viewer's own browser. Rotating
+  the password = editing that one file, no rebuild.
 - Want a real gate on viewing too? Put **Cloudflare Access** (email allow-list)
   in front of `family.l3tz.com` — no app change needed.
 
