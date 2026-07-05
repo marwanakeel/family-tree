@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ============================== EDIT THIS ==============================
-IMAGE="docker.io/marwanhefny/familytree:v3"          # bump this tag every app change (mutable tags don't re-pull)
+IMAGE="docker.io/marwanhefny/familytree:v4"          # bump this tag every app change (mutable tags don't re-pull)
 DATA_DIR="/mnt/Big Tank/containers/familytree"        # holds family.json (matches your /mnt/Big Tank/containers/<app> convention)
 NODEPORT="30086"                                      # must match the cloudflared tunnel target; distinct from dfsa (30085)
 # =======================================================================

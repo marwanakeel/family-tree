@@ -20,7 +20,7 @@ spec:
           # Node backend + app (NO data/secrets baked in). Built for linux/amd64
           # and pushed to Docker Hub; k3s pulls it on first run, then caches.
           # Bump the tag every deploy (mutable tags don't re-pull with IfNotPresent).
-          image: docker.io/marwanhefny/familytree:v3
+          image: docker.io/marwanhefny/familytree:v4
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8123
