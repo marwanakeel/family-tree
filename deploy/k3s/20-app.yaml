@@ -5,6 +5,8 @@ metadata:
   namespace: familytree
 spec:
   replicas: 1
+  strategy:
+    type: Recreate            # single writable hostPath — don't run two pods at once
   selector:
     matchLabels:
       app: familytree
@@ -15,41 +17,41 @@ spec:
     spec:
       containers:
         - name: web
-          # Static nginx image (app + family.json baked in). Built for linux/amd64
+          # Node backend + app (NO data/secrets baked in). Built for linux/amd64
           # and pushed to Docker Hub; k3s pulls it on first run, then caches.
           # Bump the tag every deploy (mutable tags don't re-pull with IfNotPresent).
-          image: docker.io/marwanhefny/familytree:v1
+          image: docker.io/marwanhefny/familytree:v3
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 80
+            - containerPort: 8123
           readinessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 8123
             initialDelaySeconds: 3
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 8123
             initialDelaySeconds: 10
             periodSeconds: 30
           resources:
             requests:
-              memory: "16Mi"
+              memory: "32Mi"
               cpu: "10m"
             limits:
-              memory: "128Mi"
-              cpu: "200m"
+              memory: "192Mi"
+              cpu: "300m"
           volumeMounts:
             - name: data
-              mountPath: /data        # nginx serves /family.json from here
-              readOnly: true
+              mountPath: /data        # server.js reads+writes tree/users/sessions here
       volumes:
         - name: data
-          # family.json lives on the node (NOT in the image). Place it at
-          # /mnt/Big Tank/containers/familytree/family.json. Replace that file
-          # to update the tree — nginx serves it live (no rebuild/redeploy).
+          # All mutable state lives on the node (NOT in the image):
+          #   /mnt/Big Tank/containers/familytree/{family.json,users.json,
+          #   sessions.json,config.local.json}
+          # Must be WRITABLE (accounts + saved edits are persisted here).
           hostPath:
             path: "/mnt/Big Tank/containers/familytree"
             type: DirectoryOrCreate
@@ -65,5 +67,5 @@ spec:
     app: familytree
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: 8123
       nodePort: 30086            # dfsa uses 30085 — keep these distinct

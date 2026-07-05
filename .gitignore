@@ -13,6 +13,9 @@ node_modules/
 family.json
 family.before-*.json
 family.real.json
+# server.js runtime data (tree, accounts, sessions, local admin config)
+.data/
+config.local.json
 import/
 *.ps
 Untitled-1.*

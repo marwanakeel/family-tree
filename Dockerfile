@@ -1,15 +1,23 @@
-# Build a tiny, self-contained image that serves the family tree with nginx.
+# The Family Tree backend + app in one tiny image.
 #   docker build -t familytree .
-#   docker run -d -p 8088:80 -v "$PWD/family.json:/data/family.json:ro" familytree
+#   docker run -d -p 8123:8123 -v "$PWD/.data:/data" \
+#     -e ADMIN_USER=admin -e ADMIN_PASS=change-me familytree
 #
-# IMPORTANT: the app SHELL only — family.json is NOT baked in. The data lives on
-# the host (mounted at /data, served as /family.json by nginx) so the published
-# image carries no family/personal data. See deploy/k3s/.
-FROM nginx:1.27-alpine
+# IMPORTANT: the app + server code ONLY — no family data, accounts, or secrets.
+# Everything mutable (family.json, users.json, sessions.json, config.local.json)
+# lives in DATA_DIR (/data), mounted from the node. Nothing personal is baked
+# into the published image. server.js is zero-dependency (Node stdlib only).
+FROM node:20-alpine
 
-COPY index.html /usr/share/nginx/html/
-COPY css/ /usr/share/nginx/html/css/
-COPY js/  /usr/share/nginx/html/js/
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+WORKDIR /app
+COPY server.js ./
+COPY index.html ./
+COPY css/ ./css/
+COPY js/  ./js/
 
-EXPOSE 80
+ENV NODE_ENV=production
+ENV DATA_DIR=/data
+ENV PORT=8123
+EXPOSE 8123
+
+CMD ["node", "server.js"]

@@ -8,12 +8,19 @@ serve.js
 package.json
 docker-compose.yml
 Dockerfile
+nginx.conf
 supabase
 .DS_Store
 import
 deploy
+# ── Real family data & runtime state — NEVER in the image (PII) ──
+family.json
+family.real.json
 family.before-*.json
 family.sample.json
+config.local.json
+.data
+Untitled-1.*
 .gitignore
 .dockerignore
 LICENSE

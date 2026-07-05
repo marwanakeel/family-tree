@@ -1,8 +1,9 @@
 // app.js — wires data, rendering, navigation and editing together.
 import { CONFIG, isShared } from './config.js';
-import { loadData, saveData, subscribe, getMode, resetLocal } from './store.js';
+import { loadData, saveData, subscribe, getMode } from './store.js';
 import { computeLayout, NODE_W, NODE_H } from './layout.js';
 import { STRINGS } from './i18n.js';
+import { Auth } from './auth.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const $ = (sel) => document.querySelector(sel);
@@ -21,13 +22,14 @@ function applyLang() {
   document.querySelectorAll('[data-i18n]').forEach((n) => { n.textContent = S[n.getAttribute('data-i18n')]; });
   document.querySelectorAll('[data-i18n-ph]').forEach((n) => { n.placeholder = S[n.getAttribute('data-i18n-ph')]; });
   document.querySelectorAll('[data-i18n-title]').forEach((n) => { n.title = S[n.getAttribute('data-i18n-title')]; });
-  const mb = $('#modeBadge'); if (mb) mb.textContent = getMode() === 'shared' ? S.shared : S.local;
+  const seg = $('#viewSeg'); if (seg) seg.setAttribute('aria-label', S.toggleView);
+  const mb = $('#modeBadge');
+  if (mb) { mb.textContent = me ? (canEdit ? S.roleAdmin : S.roleViewer) : S.local; mb.classList.toggle('admin', canEdit); if (me) mb.title = me.displayName || me.username; }
   const lb = $('#btnLang'); if (lb) lb.textContent = S.langBtn;
   const hl = $('#helpList'); if (hl) hl.innerHTML = S.helpItems.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
   applyTitle();
   if (layout.nodes.length) render(); // re-draw cards in the new language
-  updateModeButton();
-  updateBrowseButton();
+  updateViewSeg();
   updateBreadcrumbs();
   if (selectedId && byId(selectedId) && panel.classList.contains('open') && !panel.querySelector('#personForm')) openPerson(selectedId);
 }
@@ -39,7 +41,8 @@ let view = { x: 0, y: 0, k: 1 };
 let stageRect = null; // cached stage bounds (declared early — used during init before the data await)
 let focusAnim = null; // rAF id for the "center" zoom animation
 let selectedId = null;
-let unlocked = !CONFIG.editPassword;
+let me = null;             // the signed-in account (from Auth)
+let canEdit = false;       // true only for admins — viewers are read-only
 const posById = new Map(); // id -> {x,y}
 
 // ---------- Navigation state ----------
@@ -69,6 +72,13 @@ let viewport; // <g> that everything is drawn into
 init();
 
 async function init() {
+  // Gate first: viewing requires an approved account. If not signed in / not yet
+  // approved, Auth puts up the login/register/pending screen and we stop here.
+  me = await Auth.gate();
+  if (!me) return;
+  canEdit = me.role === 'admin';
+  document.body.classList.toggle('can-edit', canEdit);
+
   buildSvgSkeleton();
   wireToolbar();
   wirePanZoom();
@@ -78,22 +88,11 @@ async function init() {
   wireBrowse();
   refreshStageRect();
 
-  // Deployment-local overrides (edit password, title) served next to the data —
-  // kept OUT of the public image/repo. Missing file = defaults, silently.
-  try {
-    const r = await fetch('config.local.json', { cache: 'no-store' });
-    if (r.ok) {
-      Object.assign(CONFIG, await r.json());
-      unlocked = !CONFIG.editPassword;
-    }
-  } catch {}
-
-  $('#modeBadge').classList.toggle('shared', getMode() === 'shared');
-
   try {
     data = await loadData();
   } catch (e) {
     console.error(e);
+    toast(t('loadFailed'));
   }
   applyTitle();
   focusId = pickInitialFocus();
@@ -167,6 +166,16 @@ function siblingsOf(id) {
   for (const par of parentsOf(id)) for (const c of childrenOf(par)) if (c !== id) set.add(c);
   return [...set];
 }
+// Children of the HOUSEHOLD: this data links children to one parent (usually
+// the father), so a spouse with no links of their own inherits the couple's —
+// clicking the wife must never make the children disappear.
+function householdChildrenOf(id) {
+  const own = childrenOf(id);
+  if (own.length) return own;
+  const set = new Set();
+  for (const sp of spousesOf(id)) for (const c of childrenOf(sp)) set.add(c);
+  return [...set];
+}
 function lifespan(p) {
   const b = locText((p.birth || '').trim());
   const d = locText((p.death || '').trim());
@@ -230,9 +239,13 @@ function egoData(rootId, downDepth = 3) {
   const down = (id, depth) => {
     keep.add(id); downSet.add(id);
     if (depth >= downDepth || collapsed.has(id)) return;
-    for (const ch of childrenOf(id)) down(ch, depth + 1);
+    for (const ch of householdChildrenOf(id)) down(ch, depth + 1);
   };
-  up(rootId); down(rootId, 0);
+  up(rootId);
+  // Married-in spouse (no recorded parents): anchor the view on the blood
+  // partner's ancestor spine so the couple stays inside the family tree.
+  if (!parentsOf(rootId).length) for (const sp of spousesOf(rootId)) up(sp);
+  down(rootId, 0);
   for (const id of [...keep]) for (const sp of spousesOf(id)) keep.add(sp);
   const people = data.people.filter((p) => keep.has(p.id));
   const relationships = data.relationships.filter((r) =>
@@ -269,22 +282,24 @@ function setMode(m) {
   render();
   if (mode === 'all') fit();
   else if (focusId && byId(focusId)) frameFocus(focusId);
-  updateModeButton();
+  updateViewSeg();
   updateBreadcrumbs();
 }
-function toggleMode() { setMode(mode === 'focus' ? 'all' : 'focus'); }
 function goHome() {
   const root = rootPersonId();
   if (!root) return;
   if (surface === 'browse') setSurface('tree');
   mode = 'focus'; focusId = root; collapsed.clear();
   pushRecent(root); render(); frameFocus(root);
-  updateModeButton(); updateBreadcrumbs(); updateHash(root);
+  updateViewSeg(); updateBreadcrumbs(); updateHash(root);
 }
-function updateModeButton() {
-  const b = $('#btnMode'); if (!b) return;
-  const lbl = b.querySelector('.lbl');
-  if (lbl) lbl.textContent = mode === 'focus' ? t('fullTree') : t('focusView');
+// The segmented view switcher (تركيز | كل الشجرة | تصفّح) shows WHERE YOU ARE —
+// one control, current view highlighted, no label-flipping toggles.
+function updateViewSeg() {
+  const cur = surface === 'browse' ? 'browse' : mode; // 'focus' | 'all' | 'browse'
+  document.querySelectorAll('#viewSeg [data-view]').forEach((b) =>
+    b.classList.toggle('active', b.getAttribute('data-view') === cur)
+  );
 }
 // Hash schema: #p=<id> (tree) or #v=list|fam|dir&p=<id> (browse views).
 function readHash() {
@@ -485,9 +500,9 @@ function renderCard(p, node) {
   //   cut by the depth limit → "+N" re-roots on this person to reveal them.
   // Without the third case, 3rd-generation cards with children looked childless.
   if (mode === 'focus' && downSet.has(p.id)) {
-    const kidCount = childrenOf(p.id).length;
+    const kidCount = householdChildrenOf(p.id).length;
     const isCollapsed = collapsed.has(p.id);
-    const hasRenderedKids = !isCollapsed && childrenOf(p.id).some((c) => posById.has(c));
+    const hasRenderedKids = !isCollapsed && householdChildrenOf(p.id).some((c) => posById.has(c));
     if (kidCount) {
       const tg = el('g', { class: 'toggle', transform: `translate(${NODE_W / 2}, ${NODE_H})` });
       if (hasRenderedKids) {
@@ -661,15 +676,9 @@ function setSurface(s, tab) {
     try { localStorage.setItem('familyTree.browseTab', browseTab); } catch {}
     renderBrowse();
   }
-  updateBrowseButton();
+  updateViewSeg();
   updateBreadcrumbs();
   updateHash();
-}
-function updateBrowseButton() {
-  const b = $('#btnBrowse'); if (!b) return;
-  const key = surface === 'browse' ? 'backToTree' : 'browse';
-  b.innerHTML = (surface === 'browse' ? '🌳 ' : '📖 ') + `<span class="lbl">${t(key)}</span>`;
-  b.title = t(key);
 }
 const scrollBrowseTop = () => { const bb = $('#browseBody'); if (bb) bb.scrollTop = 0; };
 
@@ -693,22 +702,33 @@ function renderOutline(body) {
       <button data-act="collapseAll">${t('collapseAll')}</button>
     </div>`;
   const seen = new Set(); // guard against cycles in imported data
-  const addRow = (id, depth) => {
+  // `guides[a]` = does the ancestor whose connector column is `a` still have
+  // siblings below? (draws the continuous │ lines); `isLast` picks ├ vs └.
+  const addRow = (id, depth, guides, isLast) => {
     const p = byId(id); if (!p || seen.has(id)) return;
     seen.add(id);
     const kids = childrenOf(id);
     const open = expandedRows.has(id);
-    html += `<div class="brow${id === selectedId ? ' sel' : ''}" data-id="${escapeAttr(id)}" style="--d:${depth}">
-      ${kids.length ? `<button class="btwist" title="${t(open ? 'collapse' : 'expand')}">${open ? '▾' : '▸'}</button>` : '<span class="btwist none">·</span>'}
+    const guideHtml = guides.map((on, a) => (on ? `<i class="bguide" style="--g:${a}"></i>` : '')).join('');
+    // Whole ROW toggles the branch (the intuitive tap); ⓘ opens the person card.
+    html += `<div class="brow${id === selectedId ? ' sel' : ''}${depth ? ' sub' : ''}${isLast ? ' lastkid' : ''}${kids.length ? ' haskids' : ''}"
+        data-id="${escapeAttr(id)}" ${kids.length ? 'data-kids="1"' : ''} style="--d:${depth}">
+      ${guideHtml}
+      ${kids.length
+        ? `<span class="btwist${open ? ' open' : ''}" title="${t(open ? 'collapse' : 'expand')}"><i class="chev">▾</i>${cnt(kids.length)}</span>`
+        : '<span class="btwist leaf"></span>'}
       <span class="bdot ${genderClass(p)}"></span>
       <span class="bname">${escapeHtml(fullName(p))}</span>
-      ${kids.length ? `<span class="bcount" title="${t('children')}">${cnt(kids.length)}</span>` : ''}
       <span class="bmeta">${escapeHtml(lifespan(p))}</span>
+      <button class="binfo" title="${t('personCard')}">ⓘ</button>
       <button class="btree" title="${t('showInTree')}">🌳</button>
     </div>`;
-    if (open) for (const c of kids) addRow(c, depth + 1);
+    if (open) {
+      const childGuides = depth ? [...guides, !isLast] : [];
+      kids.forEach((c, i) => addRow(c, depth + 1, childGuides, i === kids.length - 1));
+    }
   };
-  addRow(root, 0);
+  addRow(root, 0, [], true);
   body.innerHTML = html;
 }
 // Expand every ancestor of `id`, re-render, then scroll its row into view.
@@ -741,23 +761,18 @@ function renderFam(body) {
   const p = byId(famId);
   if (!p) { body.innerHTML = ''; return; }
   const pars = parentsOf(famId), spouses = spousesOf(famId);
-  // The household's children are the couple's: this data links children to one
-  // parent (the father), so a wife's screen pulls them in via her spouse.
-  let kids = childrenOf(famId);
-  if (!kids.length && spouses.length) {
-    const set = new Set();
-    for (const s of spouses) for (const c of childrenOf(s)) set.add(c);
-    kids = [...set];
-  }
+  const kids = householdChildrenOf(famId); // the couple's children, whichever partner carries the links
   const cnt = (n) => (lang === 'ar' ? toAr(n) : String(n));
   const kidCard = (cid) => {
     const c = byId(cid);
     const n = childrenOf(cid).length;
     return `<div class="fam-kid ${genderClass(c)}" data-id="${escapeAttr(cid)}" data-drill="${escapeAttr(cid)}">
-      <button class="binfo" title="${t('personCard')}">ⓘ</button>
       <div class="fk-name">${escapeHtml(fullName(c))}</div>
       <div class="fk-meta">${escapeHtml(lifespan(c))}</div>
-      ${n ? `<span class="bcount" title="${t('children')}">${cnt(n)}</span>` : ''}
+      <div class="fk-foot">
+        ${n ? `<span class="bcount" title="${t('children')}">👨‍👩‍👧 ${cnt(n)}</span>` : '<span></span>'}
+        <button class="binfo" title="${t('personCard')}">ⓘ</button>
+      </div>
     </div>`;
   };
   body.innerHTML = `
@@ -852,18 +867,19 @@ function wireBrowse() {
       return;
     }
     const row = e.target.closest('[data-id]');
-    const twist = e.target.closest('.btwist:not(.none)');
-    if (twist && row) {
-      const id = row.getAttribute('data-id');
-      if (expandedRows.has(id)) expandedRows.delete(id); else expandedRows.add(id);
-      renderBrowse();
-      return;
-    }
     if (e.target.closest('.btree') && row) { jumpToTree(row.getAttribute('data-id')); return; }
     if (e.target.closest('.binfo') && row) { openPerson(row.getAttribute('data-id')); return; }
     const drill = e.target.closest('[data-drill]');
     if (drill) { famGo(drill.getAttribute('data-drill')); return; }
-    if (row) openPerson(row.getAttribute('data-id'));
+    if (row) {
+      const id = row.getAttribute('data-id');
+      // Outline rows with children: tapping the row opens/closes the branch —
+      // the thing everyone tries first. Person details live behind ⓘ.
+      if (row.hasAttribute('data-kids')) {
+        if (expandedRows.has(id)) expandedRows.delete(id); else expandedRows.add(id);
+        renderBrowse();
+      } else openPerson(id);
+    }
   });
 }
 // Leave the browse surface and land on this person in the canvas.
@@ -1022,7 +1038,7 @@ function focusOn(id) {
 function frameFocus(id) {
   const pos = posById.get(id);
   if (!pos) return;
-  const group = [id, ...spousesOf(id), ...childrenOf(id)].filter((x) => posById.has(x));
+  const group = [id, ...spousesOf(id), ...householdChildrenOf(id)].filter((x) => posById.has(x));
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const gid of group) {
     const gp = posById.get(gid);
@@ -1102,13 +1118,14 @@ function openPerson(id) {
         ${rel(t('parents'), parentsOf(id))}
         ${rel(t('spouse'), spousesOf(id))}
         ${rel(t('siblings'), siblingsOf(id))}
-        ${rel(t('children'), childrenOf(id))}
+        ${rel(t('children'), householdChildrenOf(id))}
       </div>
       <div class="actions">
         <button data-action="focus">${t('center')}</button>
         <button data-action="share">🔗 ${t('shareLink')}</button>
-        <button data-action="edit" class="primary">${t('edit')}</button>
+        ${canEdit ? `<button data-action="edit" class="primary">${t('edit')}</button>` : ''}
       </div>
+      ${canEdit ? `
       <div class="actions">
         <button data-action="add-child">${t('addChild')}</button>
         <button data-action="add-spouse">${t('addSpouse')}</button>
@@ -1119,7 +1136,7 @@ function openPerson(id) {
       </div>
       <div class="actions">
         <button data-action="delete" class="danger">${t('deletePerson')}</button>
-      </div>
+      </div>` : ''}
     </div>`;
   panel.classList.add('open');
 
@@ -1133,12 +1150,14 @@ function openPerson(id) {
     try { await navigator.clipboard.writeText(url); toast(t('linkCopied')); }
     catch { prompt(t('shareLink'), url); }
   };
-  panel.querySelector('[data-action="edit"]').onclick = () => requireUnlock(() => openForm('edit', p));
-  panel.querySelector('[data-action="add-child"]').onclick = () => requireUnlock(() => openForm('child', null, id));
-  panel.querySelector('[data-action="add-spouse"]').onclick = () => requireUnlock(() => openForm('spouse', null, id));
-  panel.querySelector('[data-action="add-parent"]').onclick = () => requireUnlock(() => openForm('parent', null, id));
-  panel.querySelector('[data-action="relations"]').onclick = () => requireUnlock(() => openRelations(id));
-  panel.querySelector('[data-action="delete"]').onclick = () => requireUnlock(() => removePerson(id));
+  if (canEdit) {
+    panel.querySelector('[data-action="edit"]').onclick = () => requireEdit(() => openForm('edit', p));
+    panel.querySelector('[data-action="add-child"]').onclick = () => requireEdit(() => openForm('child', null, id));
+    panel.querySelector('[data-action="add-spouse"]').onclick = () => requireEdit(() => openForm('spouse', null, id));
+    panel.querySelector('[data-action="add-parent"]').onclick = () => requireEdit(() => openForm('parent', null, id));
+    panel.querySelector('[data-action="relations"]').onclick = () => requireEdit(() => openRelations(id));
+    panel.querySelector('[data-action="delete"]').onclick = () => requireEdit(() => removePerson(id));
+  }
 }
 
 // ---- Relationship editor: fix/unlink/link EXISTING people ----
@@ -1391,7 +1410,11 @@ async function persist(message) {
     if (message) toast(message);
   } catch (e) {
     console.error(e);
-    toast(t('saveFailed'));
+    // 401/403 = session ended or rights lost; 409 = someone else saved first —
+    // reload rather than silently overwrite their edit.
+    if (e && (e.status === 401 || e.status === 403)) { toast(t('sessionEnded')); setTimeout(() => location.reload(), 1500); }
+    else if (e && e.status === 409) { toast(t('treeConflict')); setTimeout(() => location.reload(), 1800); }
+    else toast(t('saveFailed'));
   }
 }
 
@@ -1399,22 +1422,25 @@ async function persist(message) {
 // Toolbar, search, keyboard
 // =====================================================================
 function wireToolbar() {
-  $('#btnAdd').onclick = () => requireUnlock(() => openForm('new'));
+  $('#btnAdd').onclick = () => requireEdit(() => openForm('new'));
   const addEmpty = $('#btnAddEmpty');
-  if (addEmpty) addEmpty.onclick = () => requireUnlock(() => openForm('new'));
+  if (addEmpty) addEmpty.onclick = () => requireEdit(() => openForm('new'));
   $('#btnFit').onclick = fit;
   $('#btnFit2').onclick = fit;
-  const bm = $('#btnMode'); if (bm) bm.onclick = toggleMode;
   const bh = $('#btnHome'); if (bh) bh.onclick = goHome;
-  const bb = $('#btnBrowse'); if (bb) bb.onclick = () => setSurface(surface === 'tree' ? 'browse' : 'tree');
+  document.querySelectorAll('#viewSeg [data-view]').forEach((b) => {
+    b.onclick = () => {
+      const v = b.getAttribute('data-view');
+      if (v === 'browse') setSurface('browse');
+      else { if (surface !== 'tree') setSurface('tree'); setMode(v); }
+    };
+  });
   $('#btnZoomIn').onclick = () => zoomAt(centerX(), centerY(), 1.2);
   $('#btnZoomOut').onclick = () => zoomAt(centerX(), centerY(), 1 / 1.2);
-  const br = $('#btnReload');
-  if (br) br.onclick = () => { if (confirm(t('reloadConfirm'))) { resetLocal(); location.reload(); } };
-  $('#btnExport').onclick = exportJson;
-  $('#btnImport').onclick = () => $('#fileInput').click();
-  $('#fileInput').onchange = importJson;
+  $('#btnExport').onclick = exportJson;          // admin-only backup download
   $('#btnHelp').onclick = () => $('#helpDialog').showModal();
+  const ba = $('#btnAdmin'); if (ba) ba.onclick = openAdmin;
+  const bo = $('#btnLogout'); if (bo) bo.onclick = () => Auth.logout();
   $('#btnHelpClose').onclick = () => $('#helpDialog').close();
   // Mobile "⋯" — the secondary tools live in a dropdown there.
   const more = $('#btnMore');
@@ -1446,36 +1472,63 @@ function exportJson() {
   toast(t('downloaded'));
 }
 
-function importJson(e) {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const incoming = JSON.parse(reader.result);
-      if (!Array.isArray(incoming.people)) throw new Error('No "people" array found');
-      if (!confirm(t('replaceConfirm'))) return;
-      data = {
-        title: incoming.title || data.title,
-        people: incoming.people,
-        relationships: Array.isArray(incoming.relationships) ? incoming.relationships : [],
-      };
-      // Navigation state points at ids from the OLD tree — start fresh.
-      collapsed.clear();
-      expandedRows.clear();
-      focusId = famId = rootPersonId();
-      if (focusId) expandedRows.add(focusId);
-      applyTitle();
-      deselect();
-      persist(t('imported')(data.people.length));
-      if (surface === 'tree' && mode === 'focus' && focusId) frameFocus(focusId);
-      else if (surface === 'tree') initialView();
-    } catch (err) {
-      alert(t('importError') + err.message);
-    }
+// =====================================================================
+// Admin: family member accounts (approve / role / remove)
+// =====================================================================
+async function openAdmin() {
+  if (!canEdit) return;
+  selectedId = null;
+  panel.innerHTML = `
+    <header>
+      <h2>${t('adminTitle')}</h2>
+      <button class="close" data-action="close" title="${t('close')}">×</button>
+    </header>
+    <div class="body"><p class="hint">${t('adminLoading')}</p></div>`;
+  panel.classList.add('open');
+  panel.querySelector('[data-action="close"]').onclick = deselect;
+
+  const { ok, data: d } = await Auth.listUsers();
+  const body = panel.querySelector('.body');
+  if (!ok) { body.innerHTML = `<p class="hint">${t('adminError')}</p>`; return; }
+  const list = d.users || [];
+  const pending = list.filter((u) => !u.approved);
+  const active = list.filter((u) => u.approved);
+
+  const card = (u) => {
+    const isMe = me && u.username === me.username;
+    return `<div class="user-row" data-u="${escapeAttr(u.username)}">
+      <div class="user-meta">
+        <span class="user-name">${escapeHtml(u.displayName || u.username)}${isMe ? ` <small>(${t('you')})</small>` : ''}</span>
+        <span class="user-sub" dir="ltr">@${escapeHtml(u.username)} · <b class="role-${u.role}">${u.role === 'admin' ? t('roleAdmin') : t('roleViewer')}</b></span>
+      </div>
+      <div class="user-acts">
+        ${!u.approved ? `<button class="primary" data-act="approve">${t('approve')}</button>` : ''}
+        ${u.approved && !isMe && u.role !== 'admin' ? `<button data-act="makeAdmin">${t('makeAdmin')}</button>` : ''}
+        ${u.approved && !isMe && u.role === 'admin' ? `<button data-act="makeViewer">${t('makeViewer')}</button>` : ''}
+        ${!isMe ? `<button class="danger" data-act="remove" title="${t('removeUser')}">🗑</button>` : ''}
+      </div>
+    </div>`;
   };
-  reader.readAsText(file);
-  e.target.value = '';
+
+  body.innerHTML = `
+    ${pending.length ? `<h4 class="section-h">${t('pendingApproval')} (${pending.length})</h4><div class="user-list pending">${pending.map(card).join('')}</div>` : ''}
+    <h4 class="section-h">${t('members')} (${active.length})</h4>
+    <div class="user-list">${active.map(card).join('') || `<p class="hint">${t('none')}</p>`}</div>`;
+
+  body.querySelectorAll('[data-act]').forEach((btn) => {
+    btn.onclick = async () => {
+      const u = btn.closest('[data-u]').getAttribute('data-u');
+      const act = btn.getAttribute('data-act');
+      btn.disabled = true;
+      let r;
+      if (act === 'approve') r = await Auth.approve(u);
+      else if (act === 'makeAdmin') r = await Auth.setRole(u, 'admin');
+      else if (act === 'makeViewer') r = await Auth.setRole(u, 'viewer');
+      else if (act === 'remove') { if (!confirm(t('removeConfirm')(u))) { btn.disabled = false; return; } r = await Auth.remove(u); }
+      if (r && r.ok) { toast(t('saved')); openAdmin(); }
+      else { toast(t('adminError')); btn.disabled = false; }
+    };
+  });
 }
 
 function wireSearch() {
@@ -1531,7 +1584,7 @@ function wireKeyboard() {
     if (!selectedId || !byId(selectedId)) return;
     let target = null;
     if (k === 'ArrowUp') target = parentsOf(selectedId)[0];
-    else if (k === 'ArrowDown') target = childrenOf(selectedId)[0];
+    else if (k === 'ArrowDown') target = householdChildrenOf(selectedId)[0];
     else if (k === 'ArrowLeft' || k === 'ArrowRight') {
       const par = parentsOf(selectedId)[0];
       const sibs = par ? childrenOf(par) : [];
@@ -1546,12 +1599,11 @@ function wireKeyboard() {
 // =====================================================================
 // Misc utilities
 // =====================================================================
-function requireUnlock(fn) {
-  if (unlocked) return fn();
-  const pw = prompt(t('pwPrompt'));
-  if (pw === null) return;
-  if (pw === CONFIG.editPassword) { unlocked = true; fn(); }
-  else toast(t('wrongPw'));
+// Editing is role-gated now (server-enforced too). Viewers never see the edit
+// buttons; this is the belt-and-braces guard for anything that slips through.
+function requireEdit(fn) {
+  if (canEdit) return fn();
+  toast(t('viewOnly'));
 }
 
 let toastTimer;

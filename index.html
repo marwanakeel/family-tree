@@ -30,19 +30,21 @@
 
       <div class="toolbar">
         <button id="btnHome" data-i18n-title="home" title="الرئيسية">🏠 <span class="lbl" data-i18n="home">الرئيسية</span></button>
-        <button id="btnMode" data-i18n-title="toggleView" title="تبديل العرض">🎯 <span class="lbl" data-i18n="fullTree">كل الشجرة</span></button>
-        <button id="btnBrowse" data-i18n-title="browse" title="تصفّح">📖 <span class="lbl" data-i18n="browse">تصفّح</span></button>
+        <div class="seg" id="viewSeg" aria-label="عرض">
+          <button data-view="focus" class="active" data-i18n-title="focusView" title="تركيز">🎯 <span class="lbl" data-i18n="focusView">تركيز</span></button>
+          <button data-view="all" data-i18n-title="fullTree" title="كل الشجرة">🗺️ <span class="lbl" data-i18n="fullTree">كل الشجرة</span></button>
+          <button data-view="browse" data-i18n-title="browse" title="تصفّح">📖 <span class="lbl" data-i18n="browse">تصفّح</span></button>
+        </div>
+        <button id="btnAdd" class="primary edit-only">＋ <span class="lbl" data-i18n="add">فرد</span></button>
         <button id="btnMore" class="more-btn" data-i18n-title="more" title="المزيد">⋯</button>
         <div id="moreGroup" class="more-group">
-          <button id="btnAdd" class="primary">＋ <span class="lbl" data-i18n="add">فرد</span></button>
-          <button id="btnFit" title="ملاءمة العرض">⤢ <span class="lbl" data-i18n="all">ملاءمة</span></button>
-          <button id="btnReload" data-i18n-title="reloadFile" title="تحديث من الملف">↻ <span class="lbl" data-i18n="reloadFile">تحديث</span></button>
-          <button id="btnExport" title="تنزيل ملف العائلة">⬇︎ <span class="lbl" data-i18n="export">تصدير</span></button>
-          <button id="btnImport" title="فتح ملف عائلة">⬆︎ <span class="lbl" data-i18n="import">استيراد</span></button>
+          <button id="btnFit" title="ملاءمة العرض">⤢ <span class="lbl" data-i18n="fitBtn">ملاءمة</span></button>
+          <button id="btnAdmin" class="admin-only" data-i18n-title="adminTitle" title="الأعضاء">👥 <span class="lbl" data-i18n="members">الأعضاء</span></button>
+          <button id="btnExport" class="admin-only" title="نسخة احتياطية">⬇︎ <span class="lbl" data-i18n="export">تصدير</span></button>
           <button id="btnLang" class="lang" title="العربية / English">EN</button>
           <button id="btnHelp" class="icon" data-i18n-title="help" title="مساعدة">؟</button>
+          <button id="btnLogout" data-i18n-title="logout" title="خروج">⎋ <span class="lbl" data-i18n="logout">خروج</span></button>
         </div>
-        <input id="fileInput" type="file" accept="application/json,.json" hidden />
       </div>
     </header>
 
@@ -69,7 +71,7 @@
         <div style="font-size: 46px">🌱</div>
         <h2 data-i18n="emptyTitle">لا يوجد أفراد بعد</h2>
         <p data-i18n="emptyDesc">أضف أول فرد لتبدأ الشجرة.</p>
-        <button id="btnAddEmpty" class="primary" data-i18n="addFirst">＋ أضف أول فرد</button>
+        <button id="btnAddEmpty" class="primary edit-only" data-i18n="addFirst">＋ أضف أول فرد</button>
       </div>
 
       <div class="zoom-controls">

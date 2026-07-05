@@ -1,13 +1,8 @@
-// store.js — load/save the family data. Local-first, optional Supabase.
+// store.js — load/save the family tree via the server backend (server.js).
+// The tree is shared and durable server-side; edits by an admin are persisted
+// for everyone. (Legacy Supabase support is kept for anyone who configures it.)
 import { CONFIG, isShared } from './config.js';
 import { SEED } from './seed.js';
-
-const LS_KEY = 'familyTree.data.v1';
-const VER_KEY = 'familyTree.data.ver';
-// Bump this whenever the shipped family.json changes materially. A cached copy
-// from an older version is treated as stale and the file is reloaded instead,
-// so structural corrections aren't hidden behind a browser's saved snapshot.
-const DATA_VERSION = '2026-07-04-fixes2';
 
 let _client = null;
 async function client() {
@@ -18,7 +13,7 @@ async function client() {
 }
 
 export function getMode() {
-  return isShared() ? 'shared' : 'local';
+  return isShared() ? 'shared' : 'server';
 }
 
 function normalize(data) {
@@ -41,40 +36,24 @@ export async function loadData() {
         .maybeSingle();
       if (error) throw error;
       if (data && data.data) return normalize(data.data);
-      // No row yet: seed it from family.json so the family starts with content.
-      const seeded = await loadLocalSource();
+      const seeded = normalize(structuredClone(SEED));
       await saveData(seeded);
       return seeded;
     } catch (e) {
-      console.warn('Supabase load failed; using local source instead:', e);
+      console.warn('Supabase load failed; using seed instead:', e);
+      return normalize(structuredClone(SEED));
     }
   }
-  // Local mode: prefer this browser's saved edits — but only if they're from the
-  // current data version. An older/absent stamp means we shipped a corrected
-  // family.json, so reload the file instead of showing the stale cached copy.
-  const local = localStorage.getItem(LS_KEY);
-  const ver = localStorage.getItem(VER_KEY);
-  if (local && ver === DATA_VERSION) {
-    try {
-      return normalize(JSON.parse(local));
-    } catch {
-      /* fall through */
-    }
-  }
-  const fresh = await loadLocalSource();
-  try { localStorage.removeItem(LS_KEY); localStorage.setItem(VER_KEY, DATA_VERSION); } catch {}
-  return fresh;
+  // Server mode: the tree comes from the authenticated backend. Remember the
+  // server's updatedAt so saves can detect a concurrent edit (409 = stale).
+  const res = await fetch('/api/tree', { credentials: 'same-origin', cache: 'no-store' });
+  if (!res.ok) throw new Error('tree_load_' + res.status);
+  const raw = await res.json();
+  baseUpdatedAt = raw.updatedAt || null;
+  return normalize(raw);
 }
 
-async function loadLocalSource() {
-  try {
-    const res = await fetch('family.json', { cache: 'no-store' });
-    if (res.ok) return normalize(await res.json());
-  } catch {
-    /* file:// or missing — use the embedded seed */
-  }
-  return normalize(structuredClone(SEED));
-}
+let baseUpdatedAt = null; // updatedAt of the copy this browser is editing on top of
 
 export async function saveData(data) {
   const clean = normalize(data);
@@ -86,35 +65,33 @@ export async function saveData(data) {
     if (error) throw error;
     return;
   }
-  localStorage.setItem(LS_KEY, JSON.stringify(clean));
-  try { localStorage.setItem(VER_KEY, DATA_VERSION); } catch {}
+  const res = await fetch('/api/tree', {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...clean, baseUpdatedAt }),
+  });
+  if (!res.ok) {
+    const err = new Error('tree_save_' + res.status);
+    err.status = res.status; // 409 = someone else saved first (stale baseline)
+    throw err;
+  }
+  try { baseUpdatedAt = (await res.json()).updatedAt || baseUpdatedAt; } catch {}
 }
 
-// Local mode only: forget this browser's edits and reload family.json.
-export function resetLocal() {
-  localStorage.removeItem(LS_KEY);
-}
+// Kept for API compatibility with app.js; no per-browser cache in server mode.
+export function resetLocal() {}
 
-// Shared mode: call onChange whenever another family member saves. Returns an
-// unsubscribe function. No-op in local mode.
+// Shared (Supabase) mode: live updates from other members. No-op in server mode
+// (a light poll could be added later if desired).
 export async function subscribe(onChange) {
   if (!isShared()) return () => {};
   try {
     const sb = await client();
     const ch = sb
       .channel('family-doc')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: CONFIG.supabase.table,
-          filter: `id=eq.${CONFIG.supabase.docId}`,
-        },
-        (payload) => {
-          if (payload.new && payload.new.data) onChange(normalize(payload.new.data));
-        }
-      )
+      .on('postgres_changes', { event: '*', schema: 'public', table: CONFIG.supabase.table, filter: `id=eq.${CONFIG.supabase.docId}` },
+        (payload) => { if (payload.new && payload.new.data) onChange(normalize(payload.new.data)); })
       .subscribe();
     return () => sb.removeChannel(ch);
   } catch (e) {

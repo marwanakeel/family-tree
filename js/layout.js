@@ -72,7 +72,12 @@ export function computeLayout(data) {
     }
     const coupleW = hasSpouse ? NODE_W * 2 + COUPLE_GAP : NODE_W;
 
-    const kids = childrenOf(focusId).filter((c) => !visited.has(c));
+    // A couple's children hang under the couple no matter WHICH partner carries
+    // the parent links (this data usually links children to the father only —
+    // without the union, reaching the tree through the mother drops the kids).
+    const kidSet = new Set(childrenOf(focusId));
+    for (const s of spousesOf(focusId)) for (const c of childrenOf(s)) kidSet.add(c);
+    const kids = [...kidSet].filter((c) => !visited.has(c));
 
     if (kids.length === 0) {
       relX.set(focusId, 0);
@@ -148,8 +153,10 @@ export function computeLayout(data) {
       const id = stack.pop();
       if (out.has(id)) continue;
       out.add(id);
+      // Walk the spouse too (not just record them): the couple's children may
+      // be parent-linked to the spouse, and they must shift with this subtree.
       const sp = primarySpouse(id);
-      if (sp && relX.has(sp) && depthOf.get(sp) === depthOf.get(id)) out.add(sp);
+      if (sp && relX.has(sp) && depthOf.get(sp) === depthOf.get(id)) stack.push(sp);
       for (const c of childrenOf(id)) if (relX.has(c)) stack.push(c);
     }
     subtreeCache.set(rootId, out);

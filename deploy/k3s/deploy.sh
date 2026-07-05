@@ -13,7 +13,7 @@
 set -euo pipefail
 
 # ============================== EDIT THIS ==============================
-IMAGE="docker.io/marwanhefny/familytree:v2"          # bump this tag every app change (mutable tags don't re-pull)
+IMAGE="docker.io/marwanhefny/familytree:v3"          # bump this tag every app change (mutable tags don't re-pull)
 DATA_DIR="/mnt/Big Tank/containers/familytree"        # holds family.json (matches your /mnt/Big Tank/containers/<app> convention)
 NODEPORT="30086"                                      # must match the cloudflared tunnel target; distinct from dfsa (30085)
 # =======================================================================
@@ -39,6 +39,8 @@ metadata:
   namespace: familytree
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: familytree
@@ -52,30 +54,29 @@ spec:
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 80
+            - containerPort: 8123
           readinessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 8123
             initialDelaySeconds: 3
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /
-              port: 80
+              port: 8123
             initialDelaySeconds: 10
             periodSeconds: 30
           resources:
             requests:
-              memory: "16Mi"
+              memory: "32Mi"
               cpu: "10m"
             limits:
-              memory: "128Mi"
-              cpu: "200m"
+              memory: "192Mi"
+              cpu: "300m"
           volumeMounts:
             - name: data
-              mountPath: /data
-              readOnly: true
+              mountPath: /data       # writable: tree + accounts + sessions
       volumes:
         - name: data
           hostPath:
@@ -93,7 +94,7 @@ spec:
     app: familytree
   ports:
     - port: 80
-      targetPort: 80
+      targetPort: 8123
       nodePort: ${NODEPORT}
 EOF
 
@@ -101,8 +102,8 @@ echo "=== applied — watching rollout ==="
 k3s kubectl -n familytree rollout status deploy/familytree --timeout=120s || true
 k3s kubectl -n familytree get pods -o wide
 echo
-echo ">> Data: make sure ${DATA_DIR}/family.json exists (copy it from your Mac)."
-echo ">> Exposure (one-time): in the cloudflared tunnel add a Public Hostname"
-echo ">>   family.l3tz.com  ->  http://<nodeIP>:${NODEPORT}"
-echo ">>   (Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Public Hostname → Add.)"
+echo ">> Data dir ${DATA_DIR}: put family.json there; the app creates users.json/"
+echo ">>   sessions.json on first run. Add ${DATA_DIR}/config.local.json with the"
+echo ">>   first admin:  {\"admin\":{\"username\":\"you\",\"password\":\"...\"}}"
+echo ">> Exposure (existing cloudflared tunnel): family.l3tz.com -> http://<nodeIP>:${NODEPORT}"
 echo ">> Then open https://family.l3tz.com"
