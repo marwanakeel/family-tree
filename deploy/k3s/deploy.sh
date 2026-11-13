@@ -26,6 +26,10 @@ if [ ! -f "${DATA_DIR}/family.json" ]; then
   echo "   The site will show the built-in sample until you do."
 fi
 
+# The pod runs as uid 1000 (the image's "node" user), not root, so it must own
+# the data dir to write the tree, accounts and sessions.
+chown -R 1000:1000 "${DATA_DIR}"
+
 k3s kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Namespace
@@ -49,10 +53,27 @@ spec:
       labels:
         app: familytree
     spec:
+      # Hardening: the pod runs as an unprivileged user with no capabilities and
+      # no Kubernetes token, so a compromised app has less to escape with.
+      # The hostPath data dirs must be owned by uid 1000 (the script chowns them).
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: web
           image: ${IMAGE}
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: HOME            # uid 1000 has no home directory in the image
+              value: "/tmp"
           ports:
             - containerPort: 8123
           readinessProbe:
@@ -96,6 +117,36 @@ spec:
     - port: 80
       targetPort: 8123
       nodePort: ${NODEPORT}
+---
+# Egress isolation: this site may reach only its own namespace, DNS and the
+# public internet. It cannot open a connection to the NAS host, the LAN, the
+# tailnet or any other app (Nextcloud, Immich, Portainer). Incoming traffic
+# from cloudflared is untouched. Note: kube-router matches egress against a
+# Service's ClusterIP, so a same-namespace Service needs its own ipBlock rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: site-isolation
+  namespace: familytree
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - ipBlock:
+            cidr: 172.17.0.10/32        # cluster DNS Service IP
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
 EOF
 
 echo "=== applied — watching rollout ==="

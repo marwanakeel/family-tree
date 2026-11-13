@@ -1,0 +1,29 @@
+# Egress isolation: this site may reach only its own namespace, DNS and the
+# public internet. It cannot open a connection to the NAS host, the LAN, the
+# tailnet or any other app (Nextcloud, Immich, Portainer). Incoming traffic
+# from cloudflared is untouched. Note: kube-router matches egress against a
+# Service's ClusterIP, so a same-namespace Service needs its own ipBlock rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: site-isolation
+  namespace: familytree
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - ipBlock:
+            cidr: 172.17.0.10/32        # cluster DNS Service IP
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
